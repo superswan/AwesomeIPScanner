@@ -1,41 +1,52 @@
-import eventlet
-eventlet.monkey_patch()
-from flask_socketio import SocketIO, emit
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, send_from_directory
-from flask_cors import CORS
-import nmap
-import threading
 from threading import Lock
+import nmap
+import eventlet
+import os
+from flask import Flask, request, send_from_directory, jsonify
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+import threading
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-executor = ThreadPoolExecutor(max_workers=64)
+executor = ThreadPoolExecutor(max_workers=127)
 lock = Lock()  # Lock for thread-safe operations on the responsive_ips list
 
+# FRONTEND
 # Run frontend in separate thread 
 frontend_app = Flask(__name__, static_url_path='/static')
 
+# FRONTEND ROUTES
 @frontend_app.route('/')
 def serve_static_index():
     return send_from_directory('static', 'index.html')
 
+@frontend_app.route('/favicon.ico')
+def favicon():
+    return send_from_directory('static', 'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
+
 def run_frontend():
     frontend_app.run(port=3000)
 
-def nmap_ip(ip, service_scan_list=[], current_index=0, ip_count=1):
-    progress = (current_index + 1) / ip_count * 100
-    print(f"{progress}% complete")
-    socketio.emit('update_progress', progress)
+def update_progress(current_index=0, ip_count=1):
+        progress = (current_index + 1) / ip_count * 100
+        print(f"{int(progress)}% complete")
+        socketio.emit('update_progress', int(progress))
 
+# BACKEND Code
+def nmap_ip(ip, service_scan_list=[], current_index=0, ip_count=1):
+    update_progress(current_index, ip_count)
     nm = nmap.PortScanner()
     if service_scan_list:
         services_str = ','.join(service_scan_list)
         print(f"Scanning {ip} ({current_index}/{ip_count}) for services {services_str}...")
-        scan_args = f'-p {services_str} -T4 --min-parallelism 64 --max-parallelism 256 --host-timeout 15s'
+        scan_args = f'-p {services_str} -T4 --min-parallelism 64 --max-parallelism 256 --host-timeout 15s --max-retries 1'
 
     else:
         print(f"Ping scanning {ip}...")
@@ -73,12 +84,9 @@ def nmap_ip(ip, service_scan_list=[], current_index=0, ip_count=1):
 
             socketio.emit('scan_data', result)
             return result
-        
-
-
     return None
 
-
+# ROUTES
 @app.route('/scan', methods=['POST'])
 def scan_ips():
 
@@ -109,13 +117,7 @@ def scan_ips():
             with lock:
                 responsive_data.append(result)
             
-    # Render the IPs as an HTML list
-    table_rows = "\n".join(
-        [f"<tr><td>{entry['status']}</td><td>{entry['name']}</td><td>{entry['IP']}</td><td>{entry['manufacturer']}</td><td>{entry['mac']}</td></tr>" for entry in responsive_data]
-    )
-    html_content = f'{table_rows}'
-
-    return html_content
+    return jsonify(responsive_data)
 
 @socketio.on('connect')
 def handle_connection():
